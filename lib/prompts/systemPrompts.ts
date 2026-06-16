@@ -363,8 +363,22 @@ export function buildOutlinePrompt(inputs: NovelInputs): string {
 
   const act1End = Math.floor(inputs.chapterCount * 0.25);
   const act2End = Math.floor(inputs.chapterCount * 0.75);
+  const intimateCh1 = Math.round(inputs.chapterCount * 0.35);
+  const intimateCh2 = Math.round(inputs.chapterCount * 0.65);
 
-  return `Create a detailed chapter-by-chapter outline for a ${inputs.targetWords.toLocaleString()}-word ${inputs.genre} novel.
+  const intimateSection = inputs.hasIntimateScenes
+    ? `INTIMATE SCENES: This novel contains intimate scenes (intensity: ${inputs.nsfwIntensity}). Place them at emotionally earned moments — do NOT front-load them. Suggested placement:
+- First escalation: around chapter ${intimateCh1} (trust has been established, a threshold is crossed for the first time)
+- Peak scene: around chapter ${intimateCh2} (a turning point in the relationship)
+- Add further scenes only if the story arc warrants them
+For each chapter containing an intimate scene: set hasIntimateScene to true and write 1-2 sentences in intimateSceneNotes describing what the scene must accomplish emotionally and where it leaves the characters.`
+    : `INTIMATE SCENES: Mark hasIntimateScene as false for all chapters. Set intimateSceneNotes to "".`;
+
+  const requiredScenesSection = inputs.mustIncludeScenes?.trim()
+    ? `\nREQUIRED SCENES (absolute priority — structure the outline so every one of these occurs organically at the right narrative moment):\n${inputs.mustIncludeScenes.trim()}\n`
+    : '';
+
+  return `Create a detailed chapter-by-chapter outline for a ${inputs.targetWords.toLocaleString()}-word ${inputs.genre || 'romance'} novel.
 
 TITLE: ${inputs.title}
 GENRE: ${inputs.genre}
@@ -390,8 +404,8 @@ THREE-ACT STRUCTURE — assign every chapter to one act:
 - Act 2 (Confrontation, chapters ${act1End + 1}-${act2End}): Rising stakes, deepening connection, midpoint reversal, complications, darkest moment. The longest act — where the relationship is tested.
 - Act 3 (Resolution, chapters ${act2End + 1}-${inputs.chapterCount}): Climax, fallout, final choice, earned resolution.
 
-INTIMATE SCENES: Mark hasIntimateScene as false for all chapters. Set intimateSceneNotes to "". The user will designate intimate scene chapters manually in the outline editor after generation.
-
+${intimateSection}
+${requiredScenesSection}
 REQUIREMENTS FOR THE OUTLINE:
 - Every chapter must end on a hook, question, or cliffhanger
 - Secondary and supporting characters should have diverse names reflecting a range of cultural and ethnic backgrounds — not a default of Anglo-Saxon names
@@ -468,7 +482,7 @@ export function buildChapterContext(
 
 CHAPTER BRIEF:
 ${chapter.summary}
-${inputs.notes ? `\nAUTHOR NOTES (apply throughout):\n${inputs.notes}\n` : ''}
+${inputs.mustIncludeScenes?.trim() ? `\nREQUIRED SCENES — if any of the following belong in this chapter per the brief above, they are non-negotiable and must be included:\n${inputs.mustIncludeScenes.trim()}\n` : ''}${inputs.notes ? `\nAUTHOR NOTES (apply throughout):\n${inputs.notes}\n` : ''}
 TARGET: ${chapter.wordTarget} words. Write close to this count. Do not pad with filler. Do not cut short. Add character moments, setting details, or dialogue to reach the target naturally.
 
 WRITE AS A NOVELIST, NOT A NARRATOR:

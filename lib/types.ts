@@ -23,6 +23,7 @@ export interface NovelInputs {
   stylePreset: string;
   notes?: string;
   writingStyle?: string;
+  mustIncludeScenes?: string;
 }
 
 export interface ChapterOutline {
