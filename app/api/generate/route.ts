@@ -15,7 +15,7 @@ import { Chapter, Outline } from '@/lib/types';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
-export const maxDuration = 600;
+export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
   const { novelId } = await req.json();
