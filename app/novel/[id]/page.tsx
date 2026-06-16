@@ -6,6 +6,8 @@ interface LogEntry {
   step: string;
   detail: string;
   timestamp: string;
+  act?: number;
+  actSummary?: string;
   currentChapter?: number;
   totalChapters?: number;
   wordCount?: number;
@@ -19,6 +21,15 @@ interface LogEntry {
   chapterCount?: number;
 }
 
+const ACT_NAMES: Record<number, string> = { 1: 'Setup', 2: 'Confrontation', 3: 'Resolution' };
+
+function chapterAct(ch: ChapterOutline, total: number): 1 | 2 | 3 {
+  if (ch.act) return ch.act;
+  if (ch.index <= Math.floor(total * 0.25)) return 1;
+  if (ch.index <= Math.floor(total * 0.75)) return 2;
+  return 3;
+}
+
 export default function NovelPage({ params }: { params: { id: string } }) {
   const [novel, setNovel] = useState<Novel | null>(null);
   const [loading, setLoading] = useState(true);
@@ -30,6 +41,7 @@ export default function NovelPage({ params }: { params: { id: string } }) {
   const [activeChapter, setActiveChapter] = useState<number | null>(null);
   const [showOutlineEditor, setShowOutlineEditor] = useState(false);
   const [regeneratingChapter, setRegeneratingChapter] = useState<number | null>(null);
+  const [currentAct, setCurrentAct] = useState<number | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -40,40 +52,61 @@ export default function NovelPage({ params }: { params: { id: string } }) {
     if (res.ok) {
       const data: Novel = await res.json();
       setNovel(data);
-      if (data.outline) {
-        setEditableChapters(data.outline.chapters);
-      }
+      if (data.outline) setEditableChapters(data.outline.chapters);
     }
     setLoading(false);
   }
+
+  // ── Act computation ──────────────────────────────────────────────
+  const actInfo = useMemo(() => {
+    if (!novel?.outline) return null;
+    const total = novel.outline.chapters.length;
+    const written = new Set(novel.chapters.map(c => c.index));
+
+    const acts = ([1, 2, 3] as const).map(n => {
+      const chs = novel.outline!.chapters.filter(ch => chapterAct(ch, total) === n);
+      const doneCount = chs.filter(ch => written.has(ch.index)).length;
+      return {
+        act: n,
+        chapters: chs,
+        done: doneCount,
+        total: chs.length,
+        complete: chs.length > 0 && doneCount === chs.length,
+        started: doneCount > 0,
+        summary: novel.actSummaries?.[n] || null,
+      };
+    });
+
+    const nextAct = acts.find(a => !a.complete)?.act ?? null;
+    return { acts, nextAct };
+  }, [novel]);
 
   // ── Live stats from SSE ──────────────────────────────────────────
   const live = useMemo(() => {
     const doneEntries = logs.filter(l => l.step === 'chapter_done');
     const last = doneEntries[doneEntries.length - 1];
     const completeEntry = logs.find(l => l.step === 'complete');
-    const final = completeEntry || last;
+    const actCompleteEntry = logs.filter(l => l.step === 'act_complete').at(-1);
+    const final = completeEntry || actCompleteEntry || last;
     if (!final) return null;
     return {
       chaptersDoneInSession: doneEntries.length,
-      totalChapters: final.totalChapters || 0,
-      wordCount: completeEntry?.totalWords || final.wordCount || 0,
+      totalChapters: final.totalChapters || novel?.outline?.chapters.length || 0,
+      wordCount: completeEntry?.totalWords || actCompleteEntry?.totalWords || final.wordCount || 0,
       totalCost: final.totalCost || '$0.0000',
       isComplete: !!completeEntry,
+      actComplete: actCompleteEntry ? { act: actCompleteEntry.act, summary: actCompleteEntry.actSummary } : null,
     };
   }, [logs]);
 
   const baseChaptersDone = novel?.chapters.length || 0;
   const chapsDone = generating && live ? baseChaptersDone + live.chaptersDoneInSession : baseChaptersDone;
-  const totalCh = live?.totalChapters || novel?.outline?.chapters.length || novel?.inputs.chapterCount || 20;
+  const totalCh = novel?.outline?.chapters.length || novel?.inputs.chapterCount || 20;
   const words = generating && live ? live.wordCount : (novel?.wordCount || 0);
   const cost = generating && live ? live.totalCost : `$${(novel?.estimatedCost || 0).toFixed(4)}`;
-  const status = live?.isComplete ? 'complete' : generating ? 'generating' : (novel?.status || 'draft');
 
-  // Treat draft-with-outline the same as 'outlined' for display purposes
-  const displayStatus = (status === 'draft' && novel?.outline) ? 'outlined' : status;
-
-  const pct = totalCh > 0 ? Math.round((chapsDone / totalCh) * 100) : 0;
+  const isComplete = (live?.isComplete || novel?.status === 'complete') && !generating;
+  const displayStatus = isComplete ? 'complete' : generating ? 'generating' : (novel?.status || 'draft');
 
   async function generateOutline() {
     setGeneratingOutline(true);
@@ -110,8 +143,9 @@ export default function NovelPage({ params }: { params: { id: string } }) {
     }
   }
 
-  async function startChapterGeneration() {
+  async function startActGeneration(act: 1 | 2 | 3) {
     setGenerating(true);
+    setCurrentAct(act);
     setLogs([]);
     const controller = new AbortController();
     abortRef.current = controller;
@@ -120,7 +154,7 @@ export default function NovelPage({ params }: { params: { id: string } }) {
       const res = await fetch('/api/generate/chapters', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ novelId: params.id }),
+        body: JSON.stringify({ novelId: params.id, act }),
         signal: controller.signal,
       });
 
@@ -151,6 +185,7 @@ export default function NovelPage({ params }: { params: { id: string } }) {
       }
     } finally {
       setGenerating(false);
+      setCurrentAct(null);
       await fetchNovel();
     }
   }
@@ -172,7 +207,7 @@ export default function NovelPage({ params }: { params: { id: string } }) {
       await fetch(`/api/novels/${params.id}/reset`, { method: 'POST' });
       await fetchNovel();
       setShowOutlineEditor(false);
-      startChapterGeneration();
+      startActGeneration(1);
     } finally {
       setSavingOutline(false);
     }
@@ -230,6 +265,7 @@ export default function NovelPage({ params }: { params: { id: string } }) {
   const outline = novel.outline;
   const displayTitle = outline?.title || novel.inputs.title;
   const displayTagline = outline?.tagline || '';
+  const pct = totalCh > 0 ? Math.round((chapsDone / totalCh) * 100) : 0;
 
   return (
     <div className="pb-16">
@@ -248,8 +284,8 @@ export default function NovelPage({ params }: { params: { id: string } }) {
         </div>
       </div>
 
-      {/* Progress bar — only during/after chapter generation */}
-      {(chapsDone > 0 || generating) && (
+      {/* Overall progress bar */}
+      {chapsDone > 0 && (
         <div className="card mb-5">
           <div className="flex justify-between text-sm mb-2">
             <span className="font-medium">{chapsDone} / {totalCh} chapters</span>
@@ -258,77 +294,133 @@ export default function NovelPage({ params }: { params: { id: string } }) {
           <div className="progress-bar">
             <div className="progress-fill" style={{ width: `${pct}%` }} />
           </div>
-          {generating && logs.length > 0 && (
-            <p className="text-xs mt-2" style={{ color: 'var(--text2)' }}>
-              {logs[logs.length - 1].detail}
-            </p>
-          )}
         </div>
       )}
 
-      {/* Outline generation loading indicator */}
+      {/* Outline loading */}
       {generatingOutline && (
         <div className="card mb-5">
           <p className="text-sm animate-pulse" style={{ color: 'var(--text2)' }}>
-            Generating chapter outline with Claude Haiku — this takes about 20–30 seconds...
+            Generating chapter outline with Claude Haiku — about 20–30 seconds...
           </p>
+        </div>
+      )}
+
+      {/* ── ACT CARDS ── */}
+      {outline && actInfo && !generatingOutline && (displayStatus !== 'draft' || chapsDone > 0) && (
+        <div className="grid gap-3 mb-5">
+          {actInfo.acts.map(a => {
+            const isCurrentlyGenerating = generating && currentAct === a.act;
+            const liveActSummary = live?.actComplete?.act === a.act ? live.actComplete.summary : null;
+            const summary = liveActSummary || a.summary;
+
+            return (
+              <div
+                key={a.act}
+                className="card"
+                style={{
+                  borderColor: a.complete ? '#bbf7d0' : isCurrentlyGenerating ? 'var(--accent)' : 'var(--border)',
+                  background: a.complete ? '#f0fdf4' : isCurrentlyGenerating ? 'var(--surface)' : 'var(--card)',
+                }}
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-xs font-bold uppercase tracking-widest" style={{ color: 'var(--text2)' }}>
+                        Act {a.act}
+                      </span>
+                      <span className="text-xs font-semibold" style={{ color: a.complete ? 'var(--green)' : 'var(--text2)' }}>
+                        {ACT_NAMES[a.act]}
+                      </span>
+                      <span className="text-xs" style={{ color: 'var(--text2)' }}>
+                        · {a.done}/{a.total} chapters
+                        {a.complete && ` · ${novel.chapters.filter(c => a.chapters.some(ac => ac.index === c.index)).reduce((s, c) => s + c.wordCount, 0).toLocaleString()} words`}
+                      </span>
+                    </div>
+
+                    {/* Summary */}
+                    {summary && (
+                      <p className="text-sm leading-relaxed mt-2" style={{ color: 'var(--text1)' }}>
+                        {summary}
+                      </p>
+                    )}
+
+                    {/* In-progress indicator */}
+                    {isCurrentlyGenerating && !summary && (
+                      <p className="text-sm animate-pulse mt-1" style={{ color: 'var(--text2)' }}>
+                        {logs.length > 0 ? logs[logs.length - 1].detail : 'Starting...'}
+                      </p>
+                    )}
+
+                    {/* Not yet started hint */}
+                    {!a.started && !a.complete && !isCurrentlyGenerating && actInfo.nextAct !== a.act && (
+                      <p className="text-xs mt-1" style={{ color: 'var(--text2)' }}>
+                        Available after Act {a.act - 1} completes
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Act action button */}
+                  {!generating && !a.complete && actInfo.nextAct === a.act && (
+                    <button
+                      onClick={() => startActGeneration(a.act as 1 | 2 | 3)}
+                      className="btn btn-primary btn-sm shrink-0"
+                    >
+                      {a.started ? `Resume Act ${a.act}` : `Generate Act ${a.act}`}
+                    </button>
+                  )}
+                  {isCurrentlyGenerating && (
+                    <button onClick={stopGeneration} className="btn btn-secondary btn-sm shrink-0">
+                      Stop
+                    </button>
+                  )}
+                  {a.complete && (
+                    <span className="text-green-600 text-sm shrink-0">✓</span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
       {/* Controls */}
       <div className="flex gap-3 mb-5 flex-wrap">
-        {/* Draft, no outline → generate outline */}
-        {!generating && !generatingOutline && displayStatus === 'draft' && !novel.outline && (
+        {/* Draft, no outline */}
+        {!generating && !generatingOutline && !novel.outline && (
           <button onClick={generateOutline} className="btn btn-primary">
             Generate Outline
           </button>
         )}
 
-        {/* Outlined / interrupted → start writing or resume */}
-        {!generating && !generatingOutline && novel.outline && novel.status !== 'complete' && (
-          <button onClick={startChapterGeneration} className="btn btn-primary">
-            {chapsDone > 0 ? `Resume from Chapter ${chapsDone + 1}` : 'Start Writing'}
+        {/* Outlined, nothing started yet */}
+        {!generating && !generatingOutline && novel.outline && chapsDone === 0 && displayStatus !== 'complete' && (
+          <button onClick={() => startActGeneration(1)} className="btn btn-primary">
+            Generate Act 1
           </button>
         )}
 
-        {/* Stop button */}
-        {generating && (
-          <button onClick={stopGeneration} className="btn btn-secondary">Stop Generation</button>
-        )}
-
-        {/* Download + Google Docs */}
-        {status === 'complete' && !generating && (
+        {/* Download */}
+        {isComplete && (
           <>
             <a href={`/api/export?id=${novel.id}`} download className="btn btn-primary">Download .docx</a>
-            <button onClick={openInGoogleDocs} className="btn btn-secondary" title="Copies all text to clipboard and opens a new Google Doc — paste with Ctrl+V / Cmd+V">
+            <button onClick={openInGoogleDocs} className="btn btn-secondary"
+              title="Copies all text to clipboard and opens a new Google Doc — paste with Ctrl+V">
               Open in Google Docs
             </button>
           </>
         )}
-        {chapsDone > 0 && !generating && status !== 'complete' && (
+        {chapsDone > 0 && !generating && !isComplete && (
           <a href={`/api/export?id=${novel.id}`} download className="btn btn-secondary">Download (partial)</a>
         )}
 
-        {/* Edit outline / regenerate — available post-generation or when interrupted */}
-        {!generating && novel?.outline && (novel.status === 'complete' || novel.status === 'error' || novel.status === 'generating') && (
-          <button
-            onClick={() => setShowOutlineEditor(v => !v)}
-            className="btn btn-secondary"
-          >
+        {/* Edit outline */}
+        {!generating && novel.outline && (isComplete || novel.status === 'error' || (novel.status === 'generating' && chapsDone > 0)) && (
+          <button onClick={() => setShowOutlineEditor(v => !v)} className="btn btn-secondary">
             {showOutlineEditor ? 'Hide Outline' : 'Edit Outline'}
           </button>
         )}
       </div>
-
-      {/* Interrupted-generation notice */}
-      {!generating && novel.status === 'generating' && (
-        <div className="card mb-5" style={{ borderColor: 'var(--border)' }}>
-          <p className="text-sm" style={{ color: 'var(--text2)' }}>
-            Generation was stopped — {novel.chapters.length} chapter{novel.chapters.length !== 1 ? 's' : ''} saved.
-            Click <strong>Resume</strong> to continue from where it left off, or <strong>Edit Outline</strong> to make changes first.
-          </p>
-        </div>
-      )}
 
       {/* Generation Log */}
       {logs.length > 0 && (
@@ -350,113 +442,101 @@ export default function NovelPage({ params }: { params: { id: string } }) {
               </div>
             ))}
             {generating && (
-              <div className="log-line">
-                <span className="detail animate-pulse">...</span>
-              </div>
+              <div className="log-line"><span className="detail animate-pulse">...</span></div>
             )}
           </div>
         </div>
       )}
 
-      {/* Editable Outline — shown pre-generation or when explicitly toggled on completed novel */}
+      {/* Editable Outline */}
       {(displayStatus === 'outlined' || showOutlineEditor) && editableChapters && !generating && (
         <div className="card mb-5">
           <div className="flex justify-between items-center mb-4">
             <div className="section-label" style={{ marginBottom: 0 }}>Edit Outline</div>
             <div className="flex gap-2">
-              <button
-                onClick={generateOutline}
-                disabled={generatingOutline}
-                className="btn btn-ghost btn-sm"
-              >
+              <button onClick={generateOutline} disabled={generatingOutline} className="btn btn-ghost btn-sm">
                 {generatingOutline ? 'Regenerating...' : 'Regenerate Outline'}
               </button>
-              <button
-                onClick={saveOutline}
-                disabled={savingOutline}
-                className="btn btn-secondary btn-sm"
-              >
+              <button onClick={saveOutline} disabled={savingOutline} className="btn btn-secondary btn-sm">
                 {savingOutline ? 'Saving...' : 'Save Outline'}
               </button>
               {showOutlineEditor && (
-                <button
-                  onClick={saveAndRegenerate}
-                  disabled={savingOutline}
-                  className="btn btn-primary btn-sm"
-                >
+                <button onClick={saveAndRegenerate} disabled={savingOutline} className="btn btn-primary btn-sm">
                   {savingOutline ? 'Saving...' : 'Save & Regenerate All'}
                 </button>
               )}
             </div>
           </div>
+
+          {/* Chapters grouped by act */}
           <div className="grid gap-4">
-            {editableChapters.map((ch, idx) => (
-              <div key={ch.index} className="p-4 rounded-lg border" style={{ borderColor: 'var(--border)' }}>
-                <div className="text-xs font-bold uppercase tracking-wide mb-3" style={{ color: 'var(--text2)' }}>
-                  Chapter {ch.index}
+            {([1, 2, 3] as const).map(actNum => {
+              const actChs = editableChapters.filter(ch => chapterAct(ch, editableChapters.length) === actNum);
+              if (!actChs.length) return null;
+              return (
+                <div key={actNum}>
+                  <div className="text-xs font-bold uppercase tracking-widest mb-3 px-1" style={{ color: 'var(--text2)' }}>
+                    Act {actNum} — {ACT_NAMES[actNum]}
+                  </div>
+                  <div className="grid gap-3">
+                    {actChs.map(ch => {
+                      const idx = editableChapters.findIndex(c => c.index === ch.index);
+                      return (
+                        <div key={ch.index} className="p-4 rounded-lg border" style={{ borderColor: 'var(--border)' }}>
+                          <div className="text-xs font-bold uppercase tracking-wide mb-3" style={{ color: 'var(--text2)' }}>
+                            Chapter {ch.index}
+                          </div>
+                          <div className="grid gap-3">
+                            <div>
+                              <label>Title</label>
+                              <input value={ch.title} onChange={e => updateChapter(idx, { title: e.target.value })} />
+                            </div>
+                            <div>
+                              <label>Summary</label>
+                              <textarea rows={4} value={ch.summary} onChange={e => updateChapter(idx, { summary: e.target.value })} />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label>Word Target</label>
+                                <input type="number" value={ch.wordTarget} onChange={e => updateChapter(idx, { wordTarget: +e.target.value })} />
+                              </div>
+                              <div className="flex items-center gap-2" style={{ marginTop: '1.5rem' }}>
+                                <input
+                                  type="checkbox"
+                                  id={`intimate-${ch.index}`}
+                                  checked={ch.hasIntimateScene}
+                                  onChange={e => updateChapter(idx, { hasIntimateScene: e.target.checked })}
+                                />
+                                <label htmlFor={`intimate-${ch.index}`} style={{ marginBottom: 0 }}>Intimate scene</label>
+                              </div>
+                            </div>
+                            {ch.hasIntimateScene && (
+                              <div className="grid gap-3">
+                                <div>
+                                  <label>Scene Notes</label>
+                                  <textarea rows={2} value={ch.intimateSceneNotes || ''}
+                                    onChange={e => updateChapter(idx, { intimateSceneNotes: e.target.value })}
+                                    placeholder="What happens emotionally and narratively..." />
+                                </div>
+                                <div>
+                                  <label>Reference Scene <span className="text-xs font-normal" style={{ color: 'var(--text2)' }}>(optional)</span></label>
+                                  <textarea rows={5} value={ch.referenceScene || ''}
+                                    onChange={e => updateChapter(idx, { referenceScene: e.target.value })}
+                                    placeholder="Paste a scene from your own work to adapt for these characters..." />
+                                  <div className="hint">If provided, the scene generator adapts this as a draft rather than writing from scratch.</div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-                <div className="grid gap-3">
-                  <div>
-                    <label>Title</label>
-                    <input
-                      value={ch.title}
-                      onChange={e => updateChapter(idx, { title: e.target.value })}
-                    />
-                  </div>
-                  <div>
-                    <label>Summary</label>
-                    <textarea
-                      rows={4}
-                      value={ch.summary}
-                      onChange={e => updateChapter(idx, { summary: e.target.value })}
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label>Word Target</label>
-                      <input
-                        type="number"
-                        value={ch.wordTarget}
-                        onChange={e => updateChapter(idx, { wordTarget: +e.target.value })}
-                      />
-                    </div>
-                    <div className="flex items-center gap-2" style={{ marginTop: '1.5rem' }}>
-                      <input
-                        type="checkbox"
-                        id={`intimate-${ch.index}`}
-                        checked={ch.hasIntimateScene}
-                        onChange={e => updateChapter(idx, { hasIntimateScene: e.target.checked })}
-                      />
-                      <label htmlFor={`intimate-${ch.index}`} style={{ marginBottom: 0 }}>Intimate scene</label>
-                    </div>
-                  </div>
-                  {ch.hasIntimateScene && (
-                    <div className="grid gap-3">
-                      <div>
-                        <label>Scene Notes</label>
-                        <textarea
-                          rows={2}
-                          value={ch.intimateSceneNotes || ''}
-                          onChange={e => updateChapter(idx, { intimateSceneNotes: e.target.value })}
-                          placeholder="What happens emotionally and narratively — beats, turning points, where it leaves them..."
-                        />
-                      </div>
-                      <div>
-                        <label>Reference Scene <span className="text-xs font-normal" style={{ color: 'var(--text2)' }}>(optional)</span></label>
-                        <textarea
-                          rows={5}
-                          value={ch.referenceScene || ''}
-                          onChange={e => updateChapter(idx, { referenceScene: e.target.value })}
-                          placeholder="Paste a scene from your own work to adapt for these characters. The generator will rewrite it for this story — same acts, same sequence, same dynamic, different voices and world."
-                        />
-                        <div className="hint">If provided, the scene generator adapts this as a draft rather than writing from scratch.</div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
+
           <div className="mt-4 flex justify-end">
             <button onClick={saveOutline} disabled={savingOutline} className="btn btn-secondary">
               {savingOutline ? 'Saving...' : 'Save Outline'}
@@ -467,63 +547,74 @@ export default function NovelPage({ params }: { params: { id: string } }) {
 
       {/* Single-chapter regeneration progress */}
       {regeneratingChapter !== null && (
-        <div className="card mb-5" style={{ borderColor: 'var(--rust)', background: 'var(--surface)' }}>
-          <p className="text-sm animate-pulse">
-            Regenerating Chapter {regeneratingChapter} — takes about 20–30 seconds...
-          </p>
+        <div className="card mb-5">
+          <p className="text-sm animate-pulse">Regenerating Chapter {regeneratingChapter}...</p>
         </div>
       )}
 
-      {/* Read-only chapters list (complete/generating states) */}
-      {outline && (displayStatus === 'generating' || displayStatus === 'complete' || status === 'generating' || status === 'complete') && (
+      {/* Chapter list (grouped by act) */}
+      {outline && chapsDone > 0 && (
         <div className="card mb-5">
           <div className="section-label">Chapters</div>
-          <div className="grid gap-2">
-            {outline.chapters.map(ch => {
-              const written = novel.chapters.find(c => c.index === ch.index);
-              const justWritten = !written && logs.some(l => l.step === 'chapter_done' && l.currentChapter === ch.index);
-              const isDone = written || justWritten;
-              const isActive = activeChapter === ch.index;
-              const chWords = written?.wordCount || (justWritten
-                ? logs.find(l => l.step === 'chapter_done' && l.currentChapter === ch.index)?.chapterWords
-                : null);
+          <div className="grid gap-4">
+            {([1, 2, 3] as const).map(actNum => {
+              const actChs = outline.chapters.filter(ch => chapterAct(ch, outline.chapters.length) === actNum);
+              if (!actChs.length) return null;
               return (
-                <div key={ch.index}
-                  onClick={() => written && setActiveChapter(isActive ? null : ch.index)}
-                  className={`p-3 rounded-lg border text-sm transition-all ${
-                    written ? 'cursor-pointer hover:border-green-300' : ''
-                  } ${isActive ? 'ring-2' : ''}`}
-                  style={{
-                    borderColor: isDone ? '#bbf7d0' : 'var(--border)',
-                    background: isDone ? '#f0fdf4' : 'var(--card)',
-                  }}>
-                  <div className="flex justify-between items-center">
-                    <span className="font-medium">
-                      <span style={{ color: 'var(--text2)' }}>Ch. {ch.index}</span>{' '}
-                      {ch.title}
-                    </span>
-                    <div className="flex gap-2 items-center">
-                      {ch.hasIntimateScene && (
-                        <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: '#fce7f3', color: '#be185d' }}>intimate</span>
-                      )}
-                      {chWords && <span className="text-xs" style={{ color: 'var(--green)' }}>{chWords.toLocaleString()} words</span>}
-                      {!isDone && <span className="text-xs" style={{ color: 'var(--text2)' }}>~{ch.wordTarget.toLocaleString()}</span>}
-                      {written && !generating && (
-                        <button
-                          onClick={e => { e.stopPropagation(); regenerateSingleChapter(ch.index); }}
-                          disabled={regeneratingChapter !== null}
-                          title="Regenerate this chapter"
-                          className="text-xs px-2 py-0.5 rounded border transition-opacity"
-                          style={{ borderColor: 'var(--border)', color: 'var(--text2)', opacity: regeneratingChapter === ch.index ? 0.5 : 1 }}
-                        >
-                          {regeneratingChapter === ch.index ? '...' : '↺'}
-                        </button>
-                      )}
-                    </div>
+                <div key={actNum}>
+                  <div className="text-xs font-bold uppercase tracking-widest mb-2 px-1" style={{ color: 'var(--text2)' }}>
+                    Act {actNum} — {ACT_NAMES[actNum]}
                   </div>
-                  <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--text2)' }}>
-                    {ch.summary.length > 180 ? ch.summary.slice(0, 180) + '...' : ch.summary}
-                  </p>
+                  <div className="grid gap-2">
+                    {actChs.map(ch => {
+                      const written = novel.chapters.find(c => c.index === ch.index);
+                      const justWritten = !written && logs.some(l => l.step === 'chapter_done' && l.currentChapter === ch.index);
+                      const isDone = written || justWritten;
+                      const isActive = activeChapter === ch.index;
+                      const chWords = written?.wordCount || (justWritten
+                        ? logs.find(l => l.step === 'chapter_done' && l.currentChapter === ch.index)?.chapterWords
+                        : null);
+
+                      return (
+                        <div
+                          key={ch.index}
+                          onClick={() => written && setActiveChapter(isActive ? null : ch.index)}
+                          className={`p-3 rounded-lg border text-sm transition-all ${written ? 'cursor-pointer hover:border-green-300' : ''} ${isActive ? 'ring-2' : ''}`}
+                          style={{
+                            borderColor: isDone ? '#bbf7d0' : 'var(--border)',
+                            background: isDone ? '#f0fdf4' : 'var(--card)',
+                          }}
+                        >
+                          <div className="flex justify-between items-center">
+                            <span className="font-medium">
+                              <span style={{ color: 'var(--text2)' }}>Ch. {ch.index}</span>{' '}{ch.title}
+                            </span>
+                            <div className="flex gap-2 items-center">
+                              {ch.hasIntimateScene && (
+                                <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: '#fce7f3', color: '#be185d' }}>intimate</span>
+                              )}
+                              {chWords && <span className="text-xs" style={{ color: 'var(--green)' }}>{chWords.toLocaleString()} words</span>}
+                              {!isDone && <span className="text-xs" style={{ color: 'var(--text2)' }}>~{ch.wordTarget.toLocaleString()}</span>}
+                              {written && !generating && (
+                                <button
+                                  onClick={e => { e.stopPropagation(); regenerateSingleChapter(ch.index); }}
+                                  disabled={regeneratingChapter !== null}
+                                  title="Regenerate this chapter"
+                                  className="text-xs px-2 py-0.5 rounded border transition-opacity"
+                                  style={{ borderColor: 'var(--border)', color: 'var(--text2)', opacity: regeneratingChapter === ch.index ? 0.5 : 1 }}
+                                >
+                                  {regeneratingChapter === ch.index ? '...' : '↺'}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          <p className="mt-1 text-xs leading-relaxed" style={{ color: 'var(--text2)' }}>
+                            {ch.summary.length > 180 ? ch.summary.slice(0, 180) + '...' : ch.summary}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               );
             })}
@@ -547,11 +638,8 @@ export default function NovelPage({ params }: { params: { id: string } }) {
                   disabled={activeChapter <= 1} className="btn btn-ghost btn-sm">Prev</button>
                 <button onClick={() => setActiveChapter(activeChapter + 1)}
                   disabled={!novel.chapters.find(c => c.index === activeChapter + 1)} className="btn btn-ghost btn-sm">Next</button>
-                <button
-                  onClick={() => regenerateSingleChapter(activeChapter)}
-                  disabled={regeneratingChapter !== null || generating}
-                  className="btn btn-ghost btn-sm"
-                >
+                <button onClick={() => regenerateSingleChapter(activeChapter)}
+                  disabled={regeneratingChapter !== null || generating} className="btn btn-ghost btn-sm">
                   {regeneratingChapter === activeChapter ? 'Regenerating...' : 'Regenerate'}
                 </button>
                 <button onClick={() => setActiveChapter(null)} className="btn btn-ghost btn-sm">Close</button>

@@ -361,6 +361,9 @@ export function buildChapterSystemPrompt(presetId: string, writingStyle?: string
 export function buildOutlinePrompt(inputs: NovelInputs): string {
   const wordsPerChapter = Math.round(inputs.targetWords / inputs.chapterCount);
 
+  const act1End = Math.floor(inputs.chapterCount * 0.25);
+  const act2End = Math.floor(inputs.chapterCount * 0.75);
+
   return `Create a detailed chapter-by-chapter outline for a ${inputs.targetWords.toLocaleString()}-word ${inputs.genre} novel.
 
 TITLE: ${inputs.title}
@@ -381,6 +384,11 @@ ${inputs.plotSummary}
 ${inputs.notes ? `\nAUTHOR NOTES:\n${inputs.notes}` : ''}
 CHAPTER COUNT: ${inputs.chapterCount}
 WORDS PER CHAPTER: ~${wordsPerChapter}
+
+THREE-ACT STRUCTURE — assign every chapter to one act:
+- Act 1 (Setup, chapters 1-${act1End}): Establish world and characters, inciting incident, first spark of tension. Ends at the first major turn that locks both leads into the central conflict.
+- Act 2 (Confrontation, chapters ${act1End + 1}-${act2End}): Rising stakes, deepening connection, midpoint reversal, complications, darkest moment. The longest act — where the relationship is tested.
+- Act 3 (Resolution, chapters ${act2End + 1}-${inputs.chapterCount}): Climax, fallout, final choice, earned resolution.
 
 INTIMATE SCENES: Mark hasIntimateScene as false for all chapters. Set intimateSceneNotes to "". The user will designate intimate scene chapters manually in the outline editor after generation.
 
@@ -403,6 +411,7 @@ Output ONLY valid JSON. No markdown fences. No commentary before or after.
       "title": "chapter title",
       "summary": "150-200 word detailed summary with specific events and dialogue beats",
       "wordTarget": ${wordsPerChapter},
+      "act": 1,
       "hasIntimateScene": false,
       "intimateSceneNotes": ""
     }
@@ -645,4 +654,34 @@ Write only the scene itself — no lead-in prose that overlaps with the "before"
 Write the scene now. Start directly with the prose.`;
 
   return prompt;
+}
+
+// ─── ACT SUMMARY PROMPT ───────────────────────────────────────────────────────
+
+const ACT_NAMES: Record<number, string> = {
+  1: 'Setup',
+  2: 'Confrontation',
+  3: 'Resolution',
+};
+
+export function buildActSummaryPrompt(
+  chapters: { index: number; title: string; summary: string }[],
+  act: number,
+): string {
+  const chapterLines = chapters
+    .map(c => `Ch ${c.index} "${c.title}": ${c.summary}`)
+    .join('\n\n');
+
+  return `Write a 200-250 word Act ${act} (${ACT_NAMES[act]}) recap for this novel based on the chapter summaries below.
+
+Cover:
+- What happened to the relationship between the two leads — how it shifted across this act
+- The key plot turning points and what changed as a result
+- Where each lead stands emotionally at the end of this act
+- What unresolved tension or questions carry into the next act
+
+ACT ${act} CHAPTERS:
+${chapterLines}
+
+Write only the recap — no heading, no "Act ${act}:" prefix. Plain paragraph prose.`;
 }

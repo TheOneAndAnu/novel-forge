@@ -30,6 +30,7 @@ export interface ChapterOutline {
   title: string;
   summary: string;
   wordTarget: number;
+  act?: 1 | 2 | 3;
   hasIntimateScene: boolean;
   intimateSceneNotes?: string;
   referenceScene?: string;
@@ -62,6 +63,7 @@ export interface Novel {
   totalOutputTokens: number;
   estimatedCost: number;
   storyBible?: string;
+  actSummaries?: Record<number, string>;
   createdAt: string;
   updatedAt: string;
   error?: string;
